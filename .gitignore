@@ -1,0 +1,20 @@
+# --- Secretos: NUNCA al repositorio ---
+.env
+
+# --- Datos de clientes (teléfonos) y de la operación ---
+*.csv
+asignaciones.json
+pendientes_ultimo.txt
+fallidos_ultimo.txt
+logs/
+
+# --- Configuración propia de cada PC (series, IP y MAC de los teléfonos) ---
+config_telefono.json
+telefonos_conocidos.json
+
+# --- Copias de respaldo y temporales ---
+respaldo/
+*.bak*
+*.tmp
+__pycache__/
+*.pyc
