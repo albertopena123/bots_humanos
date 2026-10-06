@@ -2489,9 +2489,11 @@ class App(tk.Tk):
         self.log(f"[{ph['name']}] {'ENSAYO de reseteo (no borra nada)' if dry else '🧨 RESETEO DE FÁBRICA solicitado por el operador'}…")
         self.bg(self._factory_reset, ph, serial, dry)
 
-    def _reset_find_text(self, xml, pat):
+    def _reset_find_text(self, xml, pat, skip_edit=False):
         for m in re.finditer(r"<node[^>]*>", xml or ""):
             t = m.group(0)
+            if skip_edit and "EditText" in t:
+                continue                            # el cuadro de búsqueda repite lo que escribimos: no es un resultado
             txt = html.unescape((re.search(r'text="([^"]*)"', t) or [None, ""])[1])
             if txt and re.search(pat, txt, re.I):
                 c = self._node_center(t)
@@ -2531,9 +2533,11 @@ class App(tk.Tk):
             self.shell("input", "keyevent", "KEYCODE_SPACE", serial=serial)
         time.sleep(2.5)
         xml = self._hdump(serial)
-        hit = self._reset_find_text(xml, self.RESET_PASOS[1])
+        hit = self._reset_find_text(xml, self.RESET_PASOS[1], skip_edit=True)
         if not hit:
+            self.log(f"[{name}] el buscador no mostró ningún resultado. En pantalla: " + " | ".join(self._screen_texts(xml, 10)))
             return False
+        self.log(f"[{name}] resultado del buscador: '{hit['text'][:60]}'")
         self._tap(serial, hit)
         time.sleep(2.5)
         return True
@@ -2557,7 +2561,8 @@ class App(tk.Tk):
             if locked:
                 self.log(f"[{name}] la pantalla está bloqueada: desbloquéala a mano y vuelve a intentarlo.")
                 return
-            self.shell("am", "start", "-n", "com.android.settings/.Settings$SystemDashboardActivity", serial=serial)
+            # el '\$' es necesario: sin escapar, la consola del teléfono borra '$SystemDashboardActivity' y abre Ajustes general
+            self.shell("am", "start", "-n", "com.android.settings/.Settings\\$SystemDashboardActivity", serial=serial)
             time.sleep(2.5)
             llegado = True
             for i, pat in enumerate(self.RESET_PASOS, 1):
