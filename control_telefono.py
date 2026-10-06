@@ -1535,6 +1535,7 @@ class App(tk.Tk):
         ttk.Button(pb, text="👥 Contactos del teléfono", command=self.show_assigned).grid(row=5, column=0, sticky="we", padx=2, pady=2)
         ttk.Button(pb, text="📋 Ver asignaciones en consola", command=self.list_assignments_console).grid(row=5, column=1, sticky="we", padx=2, pady=2)
         ttk.Button(pb, text="📥 Repartir archivo entre teléfonos", command=self.import_assignments_file).grid(row=6, column=0, columnspan=2, sticky="we", padx=2, pady=2)
+        ttk.Button(pb, text="🧨 Reseteo de fábrica del teléfono…", command=self.factory_reset_selected).grid(row=7, column=0, columnspan=2, sticky="we", padx=2, pady=(8, 2))
         pb.columnconfigure(0, weight=1)
         pb.columnconfigure(1, weight=1)
         ttk.Label(left, foreground="#666", wraplength=330, justify="left",
@@ -2452,6 +2453,146 @@ class App(tk.Tk):
             return
         self.btn_activar.configure(state="disabled", text="⏳ Activando…")
         self.bg(self._activate_all, self._wa_pkg(), bool(self.wa_human.get()))
+
+    # ============================================================ RESETEO DE FÁBRICA
+    RESET_PASOS = (r"Opciones de recuperaci|Restablecer opciones|Reset options|^Restablec",
+                   r"Borrar todos los datos|Erase all data|restablecer.*f[aá]brica")
+
+    def factory_reset_selected(self):
+        """HILO PRINCIPAL. Borrado completo del teléfono seleccionado (o ENSAYO: recorre todo y para antes del botón final)."""
+        ph = self.selected_phone()
+        if not ph:
+            self.log("Selecciona en la lista el teléfono que quieres resetear.")
+            return
+        if self.bulk_active or self._activating.locked():
+            messagebox.showwarning("Ahora no", "Hay un envío o una activación en curso. Espera a que termine.", parent=self)
+            return
+        serial = self.phone_state(ph)[0]
+        if not serial:
+            messagebox.showwarning("Sin conexión", f"{ph['name']} no está conectado. Pulsa ⚡ ACTIVAR TODOS o conéctalo por USB.", parent=self)
+            return
+        r = messagebox.askyesnocancel(
+            "Reseteo de fábrica", f"Teléfono: {ph['name']} (serie {ph.get('hw') or '?'}, {serial}).\n\n"
+            "Esto BORRA TODO el teléfono: WhatsApp, cuentas, fotos, apps y la depuración USB. No se puede deshacer.\n"
+            "Después habrá que configurarlo a mano y registrarlo otra vez con el cable.\n\n"
+            "SÍ = BORRAR de verdad\nNO = solo ENSAYO: recorre las pantallas y se detiene antes del botón final (recomendado la primera vez)\n"
+            "Cancelar = no hacer nada", parent=self)
+        if r is None:
+            return
+        dry = not r
+        if not dry:
+            txt = simpledialog.askstring("Confirmación final",
+                                         f"Para borrar {ph['name']} escribe exactamente su nombre:\n\n{ph['name']}", parent=self)
+            if (txt or "").strip() != ph["name"]:
+                self.log(f"[{ph['name']}] reseteo cancelado: el nombre no coincide.")
+                return
+        self.log(f"[{ph['name']}] {'ENSAYO de reseteo (no borra nada)' if dry else '🧨 RESETEO DE FÁBRICA solicitado por el operador'}…")
+        self.bg(self._factory_reset, ph, serial, dry)
+
+    def _reset_find_text(self, xml, pat):
+        for m in re.finditer(r"<node[^>]*>", xml or ""):
+            t = m.group(0)
+            txt = html.unescape((re.search(r'text="([^"]*)"', t) or [None, ""])[1])
+            if txt and re.search(pat, txt, re.I):
+                c = self._node_center(t)
+                if c:
+                    return dict(c, text=txt)
+        return None
+
+    def _reset_scroll_find(self, serial, pat, tries=4):
+        for _ in range(tries):
+            xml = self._hdump(serial)
+            hit = self._reset_find_text(xml, pat)
+            if hit:
+                return hit, xml
+            self.shell("input", "swipe", "540", "1800", "540", "700", "300", serial=serial)
+            time.sleep(1.0)
+        return None, self._hdump(serial)
+
+    def _factory_reset(self, ph, serial, dry):
+        """HILO bg. Reserva el teléfono, recorre Ajustes hasta la pantalla final y, si no es ensayo, toca el botón de borrar."""
+        name, key = ph["name"], self.phone_key_of(ph)
+        fin = None
+        claim = self._act_claim(key, serial)
+        if claim:
+            self.log(f"[{name}] no se puede resetear ahora: {claim[1]}.")
+            return
+        try:
+            real = (self.shell("getprop", "ro.serialno", serial=serial, timeout=10) or "").strip()
+            if ph.get("hw") and real != ph["hw"]:
+                self.log(f"[{name}] ABORTADO: en {serial} contesta otro aparato ({real}). No se toca nada.")
+                return
+            FILELOG.write("WARN", f"[{name}] {'ENSAYO' if dry else 'RESETEO REAL'} de fábrica iniciado en {serial} (serie {real})")
+            self.wake_unlock(serial)
+            _focus, locked = self._focus_state(serial)
+            if locked:
+                self.log(f"[{name}] la pantalla está bloqueada: desbloquéala a mano y vuelve a intentarlo.")
+                return
+            self.shell("am", "start", "-n", "com.android.settings/.Settings$SystemDashboardActivity", serial=serial)
+            time.sleep(2.5)
+            for i, pat in enumerate(self.RESET_PASOS, 1):
+                hit, xml = self._reset_scroll_find(serial, pat)
+                if not hit:
+                    vistos = self._screen_texts(xml, 10)
+                    self.log(f"[{name}] no encontré la opción {i} en Ajustes. En pantalla se lee: " + " | ".join(vistos)
+                             + ". No se tocó nada más.")
+                    return
+                self.log(f"[{name}] paso {i}: '{hit['text'][:40]}'")
+                self._tap(serial, hit)
+                time.sleep(2.5)
+            xml = self._hdump(serial)
+            ini = self.ui_find(xml, "initiate_master_clear") or self._reset_find_text(xml, r"^Borrar todos los datos$|^Erase all data$")
+            if not ini:
+                self.log(f"[{name}] no apareció la pantalla 'Borrar todos los datos'. En pantalla: "
+                         + " | ".join(self._screen_texts(xml, 10)) + ". No se tocó nada más.")
+                return
+            self.log(f"[{name}] pantalla de borrado abierta; tocando 'Borrar todos los datos' (primera confirmación)…")
+            self._tap(serial, ini)
+            time.sleep(3.0)
+            fin = None
+            limite = time.time() + 90           # si pide PIN/patrón, el operador lo escribe en el teléfono
+            avisado = False
+            while time.time() < limite:
+                xml = self._hdump(serial)
+                fin = self.ui_find(xml, "execute_master_clear") or self._reset_find_text(xml, r"^Borrar todos los datos$|^Erase everything$|^Erase all data$")
+                if fin:
+                    break
+                if not avisado and re.search(r"PIN|patr[oó]n|contraseña|password", xml or "", re.I):
+                    avisado = True
+                    self.log(f"[{name}] el teléfono pide el PIN/patrón: escríbelo EN EL TELÉFONO (espero hasta 90 s).")
+                time.sleep(2.0)
+            if not fin:
+                self.log(f"[{name}] no apareció la confirmación final. En pantalla: " + " | ".join(self._screen_texts(xml, 10))
+                         + ". No se tocó nada más.")
+                return
+            if dry:
+                self.log(f"[{name}] ✔ ENSAYO OK: llegué hasta el botón final '{fin.get('text') or 'Borrar todos los datos'}' "
+                         "y NO lo toqué. El botón real funcionará igual. Saliendo…")
+                FILELOG.write("WARN", f"[{name}] ENSAYO de reseteo terminado sin borrar")
+                return
+            FILELOG.write("WARN", f"[{name}] 🧨 TOCANDO el botón final de borrado en {serial}")
+            self._tap(serial, fin)
+            self.log(f"[{name}] 🧨 BORRADO INICIADO. El teléfono se reiniciará solo y desaparecerá de la lista. "
+                     "Cuando termine la configuración inicial, conéctalo por USB para registrarlo de nuevo.")
+            ph["ip"] = None
+            save_config(self.cfg)
+            self.after(0, self.fill_tree)
+        except subprocess.TimeoutExpired:
+            self.log(f"[{name}] el teléfono dejó de responder" + ("" if dry else " (si el borrado ya empezó, es normal)") + ".")
+        except Exception as e:
+            FILELOG.error(f"[{name}] reseteo: {e}", e)
+            self.log(f"[{name}] error en el reseteo: {str(e)[:120]}")
+        finally:
+            with self._bulk_lock:
+                self._act_busy.discard(key)
+            if dry or not fin:
+                try:                                # salir de Ajustes sin dejar nada a medias
+                    for _ in range(5):
+                        self.shell("input", "keyevent", "KEYCODE_BACK", serial=serial, timeout=8)
+                        time.sleep(0.5)
+                    self.shell("input", "keyevent", "KEYCODE_HOME", serial=serial, timeout=8)
+                except Exception:
+                    pass
 
     def _act_claim(self, key, serial=None):
         """None si el teléfono queda reservado; si no, (ok, motivo). Atómico frente a spawn() (mismo candado)."""
