@@ -2455,8 +2455,8 @@ class App(tk.Tk):
         self.bg(self._activate_all, self._wa_pkg(), bool(self.wa_human.get()))
 
     # ============================================================ RESETEO DE FÁBRICA
-    RESET_PASOS = (r"Opciones de recuperaci|Restablecer opciones|Reset options|^Restablec",
-                   r"Borrar todos los datos|Erase all data|restablecer.*f[aá]brica")
+    RESET_PASOS = (r"restablec|recuperaci|reset",                                   # 'Opciones de restablecimiento', 'Restablecer…'
+                   r"borrar todos los datos|erase all data|restablecer.*f[aá]brica|datos de f[aá]brica|factory")
 
     def factory_reset_selected(self):
         """HILO PRINCIPAL. Borrado completo del teléfono seleccionado (o ENSAYO: recorre todo y para antes del botón final)."""
@@ -2499,15 +2499,44 @@ class App(tk.Tk):
                     return dict(c, text=txt)
         return None
 
-    def _reset_scroll_find(self, serial, pat, tries=4):
-        for _ in range(tries):
+    def _reset_scroll_find(self, serial, pat, tries=5):
+        """Busca un texto en la pantalla actual; si no está, desplaza hacia abajo y luego hacia arriba."""
+        xml = self._hdump(serial)
+        hit = self._reset_find_text(xml, pat)
+        if hit:
+            return hit, xml
+        for y1, y2 in ((1800, 700),) * tries + ((700, 1800),) * tries:
+            self.shell("input", "swipe", "540", str(y1), "540", str(y2), "300", serial=serial)
+            time.sleep(1.0)
             xml = self._hdump(serial)
             hit = self._reset_find_text(xml, pat)
             if hit:
                 return hit, xml
-            self.shell("input", "swipe", "540", "1800", "540", "700", "300", serial=serial)
-            time.sleep(1.0)
-        return None, self._hdump(serial)
+        return None, xml
+
+    def _reset_via_search(self, serial, name):
+        """Respaldo: buscador de Ajustes -> 'borrar todos los datos' -> tocar el resultado. Devuelve True si abrió algo."""
+        self.log(f"[{name}] probando por el buscador de Ajustes…")
+        self.shell("am", "start", "-a", "android.settings.SETTINGS", serial=serial)
+        time.sleep(2.5)
+        xml = self._hdump(serial)
+        box = (self.ui_find(xml, "search_action_bar") or self.ui_find(xml, "search_bar")
+               or self._reset_find_text(xml, r"Buscar en (los )?ajustes|Search settings"))
+        if not box:
+            return False
+        self._tap(serial, box)
+        time.sleep(1.5)
+        for w in ("borrar", "todos", "los", "datos"):
+            self.shell("input", "text", w, serial=serial)
+            self.shell("input", "keyevent", "KEYCODE_SPACE", serial=serial)
+        time.sleep(2.5)
+        xml = self._hdump(serial)
+        hit = self._reset_find_text(xml, self.RESET_PASOS[1])
+        if not hit:
+            return False
+        self._tap(serial, hit)
+        time.sleep(2.5)
+        return True
 
     def _factory_reset(self, ph, serial, dry):
         """HILO bg. Reserva el teléfono, recorre Ajustes hasta la pantalla final y, si no es ensayo, toca el botón de borrar."""
@@ -2530,16 +2559,21 @@ class App(tk.Tk):
                 return
             self.shell("am", "start", "-n", "com.android.settings/.Settings$SystemDashboardActivity", serial=serial)
             time.sleep(2.5)
+            llegado = True
             for i, pat in enumerate(self.RESET_PASOS, 1):
                 hit, xml = self._reset_scroll_find(serial, pat)
                 if not hit:
-                    vistos = self._screen_texts(xml, 10)
-                    self.log(f"[{name}] no encontré la opción {i} en Ajustes. En pantalla se lee: " + " | ".join(vistos)
-                             + ". No se tocó nada más.")
-                    return
+                    self.log(f"[{name}] no encontré la opción {i} en Ajustes > Sistema. En pantalla se lee: "
+                             + " | ".join(self._screen_texts(xml, 10)))
+                    llegado = False
+                    break
                 self.log(f"[{name}] paso {i}: '{hit['text'][:40]}'")
                 self._tap(serial, hit)
                 time.sleep(2.5)
+            if not llegado and not self._reset_via_search(serial, name):
+                self.log(f"[{name}] tampoco apareció por el buscador. No se tocó nada más. "
+                         "Dime cómo se llama en tu teléfono la opción de restablecer y lo ajusto.")
+                return
             xml = self._hdump(serial)
             ini = self.ui_find(xml, "initiate_master_clear") or self._reset_find_text(xml, r"^Borrar todos los datos$|^Erase all data$")
             if not ini:
